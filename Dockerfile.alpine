@@ -1,0 +1,10 @@
+FROM alpine
+
+COPY src/ /app/
+
+WORKDIR /app
+
+RUN apk add --no-cache gst-libav gst-plugins-bad gst-plugins-base gst-plugins-good gst-plugins-ugly py3-pip py3-redis py3-gobject3 && pip install --user -r requirements.txt --break-system-packages
+# Need to break things since rq is not available in repo and venv has no access to python system libraries and alpine cannot build cairo python bindings
+
+CMD ["/app/worker.py"]
