@@ -1,0 +1,17 @@
+{
+  "video_encoder": {
+    "name": "svtav1enc",
+    "properties": {
+      "crf": 28,
+      "parameters-string": "preset=6:enable-tf=0:enable-qm=1:qm-min=0:tune=0:enable-overlays=1:scd=1:scm=0"
+    }
+  },
+  "audio_encoder": {
+    "name": "opusenc",
+    "properties": {
+      "bitrate": 96000
+    }
+  },
+  "video_caps": "video/x-raw,format=I420_10LE",
+  "workdir": "/tmp/enc"
+}
