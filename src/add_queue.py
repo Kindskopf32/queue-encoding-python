@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import PurePath
 import argparse
+import re
 
 import redis
 import rq
@@ -40,7 +41,7 @@ q = rq.Queue(connection=redis.Redis('$REDIS', 6379))
 #print(os.path.basename(args.item))
 #print(f"{os.path.splitext(os.path.basename(args.item))[0]}.av1.mp4")
 infile = os.path.join(os.path.dirname(args.item), os.path.basename(args.item))
-outfile = os.path.join(os.path.dirname(args.item), f"{os.path.basename(args.item)}.av1.mp4")
+outfile = os.path.join(os.path.dirname(args.item), f"{re.sub(r'.mp4$', r'.av1.mp4', os.path.basename(args.item))}")
 print(f"Would encode file {infile} to {outfile}")
 if args.config:
     job = q.enqueue(run_transcoding, infile, outfile, args.config, job_timeout=43200)
