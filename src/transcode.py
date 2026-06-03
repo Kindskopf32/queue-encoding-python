@@ -156,13 +156,11 @@ def prepare_workdir(workdir_path: Path):
     workdirs = (workdir, os.path.join(workdir, "in"), os.path.join(workdir, "out"))
     for dir in workdirs:
         dir = Path(dir)
-        if dir and not dir.is_dir():
+        if not dir.is_dir():
             print(f"Creating dir {dir}")
-            dir.mkdir()
-        elif dir and dir.is_dir():
-            print(f"Dir {dir} exists")
+            dir.mkdir(parents=True, exist_ok=True)
         else:
-            raise OSError(f"Could not create workdir {dir}")
+            print(f"Dir {dir} exists")
 
 
 def cleanup_workdir(workdir_path: Path):
@@ -196,11 +194,13 @@ def run_transcoding(input_path: Path, output_path: Path, config_path: Path | Non
 
     start_time = time.time()
     duration_holder = [Gst.CLOCK_TIME_NONE]
+    succeeded = [False]
 
     def on_message(_, message):
         msg_type = message.type
         if msg_type == Gst.MessageType.EOS:
             print(f"\nDone! Total time: {time.time() - start_time:.2f} seconds.")
+            succeeded[0] = True
             pipeline.set_state(Gst.State.NULL)
             loop.quit()
         elif msg_type == Gst.MessageType.ERROR:
@@ -219,6 +219,10 @@ def run_transcoding(input_path: Path, output_path: Path, config_path: Path | Non
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
         pipeline.set_state(Gst.State.NULL)
+
+    if not succeeded[0]:
+        cleanup_workdir(Path(workdir_path))
+        raise RuntimeError("Transcoding did not complete successfully; output not written.")
 
     print(f"Copying processed file {os.path.basename(workpath_out)} to {output_path.absolute()}")
     shutil.copy(workpath_out, output_path)

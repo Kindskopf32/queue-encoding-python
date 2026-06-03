@@ -4,7 +4,10 @@ COPY src/ /app/
 
 WORKDIR /app
 
-RUN apk add --no-cache gst-libav gst-plugins-bad gst-plugins-base gst-plugins-good gst-plugins-ugly py3-pip py3-redis py3-gobject3 && pip install rq --target /usr/lib/python3.12/site-packages --upgrade
+RUN apk add --no-cache gst-libav gst-plugins-bad gst-plugins-base gst-plugins-good gst-plugins-ugly py3-pip py3-redis py3-gobject3 && pip install rq --target /usr/lib/python3.12/site-packages --upgrade && adduser -D -u 1000 worker && chown -R 1000:1000 /app
 # Need to break things since rq is not available in repo and venv has no access to python system libraries and alpine cannot build cairo python bindings
+
+# Run as a non-root user.
+USER 1000:1000
 
 CMD ["/app/worker.py"]
