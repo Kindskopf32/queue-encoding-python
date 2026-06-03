@@ -6,6 +6,7 @@ import argparse
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 gi.require_version('Gst', '1.0')
@@ -254,28 +255,36 @@ def resolve_workdir(workdir_path: Path) -> Path:
     return workdir
 
 
-def prepare_workdir(workdir_path: Path):
-    workdir = resolve_workdir(workdir_path)
-    workdirs = (workdir, workdir / "in", workdir / "out")
-    for dir in workdirs:
-        if not dir.is_dir():
-            print(f"Creating dir {dir}")
-            dir.mkdir(parents=True, exist_ok=True)
-        else:
-            print(f"Dir {dir} exists")
+def prepare_workdir_base(workdir_path: Path) -> Path:
+    """Validate and create the base dir that holds per-run staging dirs."""
+    base = resolve_workdir(workdir_path)
+    # 0700 so other local users cannot read staged media. (mode is only applied
+    # when we create it; an unpredictable per-run subdir is what actually
+    # defeats the symlink race below regardless of the base's permissions.)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return base
 
 
-def cleanup_workdir(workdir_path: Path):
-    workdir = resolve_workdir(workdir_path)
-    # Only touch the staging subdirectories we manage, not arbitrary files
-    # that may have ended up under the workdir.
-    for sub in (workdir / "in", workdir / "out"):
-        if not sub.is_dir():
-            continue
-        for root, dirs, files in sub.walk():
-            for name in files:
-                print(f"Deleting {root / name}")
-                (root / name).unlink()
+def make_run_workdir(base: Path) -> Path:
+    """Create a fresh, unpredictable 0700 staging dir for a single job.
+
+    A fixed path like /tmp/enc/in is a symlink-race target: a local attacker
+    can pre-seed it so our copies follow links to files we shouldn't touch.
+    mkdtemp picks a random name and creates it with O_EXCL at mode 0700, so it
+    cannot be guessed or pre-created.
+    """
+    run_dir = Path(tempfile.mkdtemp(prefix="enc-", dir=base))
+    (run_dir / "in").mkdir(mode=0o700)
+    (run_dir / "out").mkdir(mode=0o700)
+    return run_dir
+
+
+def cleanup_run_workdir(base: Path, run_dir: Path):
+    """Remove a single job's staging dir, refusing to escape the base."""
+    run_dir = run_dir.resolve()
+    if run_dir == base or not run_dir.is_relative_to(base):
+        raise ValueError(f"Refusing to remove staging dir outside base: {run_dir}")
+    shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def run_transcoding(input_path: Path, output_path: Path, config_path: Path | None=None):
@@ -286,56 +295,56 @@ def run_transcoding(input_path: Path, output_path: Path, config_path: Path | Non
     if not isinstance(config_path, Path) and config_path:
         config_path = Path(config_path)
     config = load_config(config_path)
-    workdir_path = config.get("workdir", "/tmp/enc")
-    prepare_workdir(workdir_path)
-    workpath_in = Path(os.path.join(workdir_path, "in", os.path.basename(input_path)))
-    workpath_out = Path(os.path.join(workdir_path, "out", os.path.basename(output_path)))
-    print(f"Copying file {os.path.basename(input_path)} to {workpath_in}")
-    shutil.copy(input_path, workpath_in)
-
-    Gst.init(None)
-    pipeline = build_pipeline(workpath_in, workpath_out, config)
-    bus = pipeline.get_bus()
-    bus.add_signal_watch()
-    loop = GLib.MainLoop()
-
-    start_time = time.time()
-    duration_holder = [Gst.CLOCK_TIME_NONE]
-    succeeded = [False]
-
-    def on_message(_, message):
-        msg_type = message.type
-        if msg_type == Gst.MessageType.EOS:
-            print(f"\nDone! Total time: {time.time() - start_time:.2f} seconds.")
-            succeeded[0] = True
-            pipeline.set_state(Gst.State.NULL)
-            loop.quit()
-        elif msg_type == Gst.MessageType.ERROR:
-            err, debug = message.parse_error()
-            print(f"\nError: {err}\nDebug: {debug}")
-            pipeline.set_state(Gst.State.NULL)
-            loop.quit()
-
-    bus.connect("message", on_message)
-
-    pipeline.set_state(Gst.State.PLAYING)
-    GLib.timeout_add(500, print_progress, pipeline, start_time, duration_holder)
-
+    workdir_base = prepare_workdir_base(config.get("workdir", "/tmp/enc"))
+    run_dir = make_run_workdir(workdir_base)
     try:
-        loop.run()
-    except KeyboardInterrupt:
-        print("\nInterrupted by user.")
-        pipeline.set_state(Gst.State.NULL)
+        workpath_in = run_dir / "in" / os.path.basename(input_path)
+        workpath_out = run_dir / "out" / os.path.basename(output_path)
+        print(f"Copying file {os.path.basename(input_path)} to {workpath_in}")
+        shutil.copy(input_path, workpath_in)
 
-    if not succeeded[0]:
-        cleanup_workdir(Path(workdir_path))
-        raise RuntimeError("Transcoding did not complete successfully; output not written.")
+        Gst.init(None)
+        pipeline = build_pipeline(workpath_in, workpath_out, config)
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+        loop = GLib.MainLoop()
 
-    print(f"Copying processed file {os.path.basename(workpath_out)} to {output_path.absolute()}")
-    shutil.copy(workpath_out, output_path)
+        start_time = time.time()
+        duration_holder = [Gst.CLOCK_TIME_NONE]
+        succeeded = [False]
 
-    print("Cleaning up")
-    cleanup_workdir(Path(workdir_path))
+        def on_message(_, message):
+            msg_type = message.type
+            if msg_type == Gst.MessageType.EOS:
+                print(f"\nDone! Total time: {time.time() - start_time:.2f} seconds.")
+                succeeded[0] = True
+                pipeline.set_state(Gst.State.NULL)
+                loop.quit()
+            elif msg_type == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                print(f"\nError: {err}\nDebug: {debug}")
+                pipeline.set_state(Gst.State.NULL)
+                loop.quit()
+
+        bus.connect("message", on_message)
+
+        pipeline.set_state(Gst.State.PLAYING)
+        GLib.timeout_add(500, print_progress, pipeline, start_time, duration_holder)
+
+        try:
+            loop.run()
+        except KeyboardInterrupt:
+            print("\nInterrupted by user.")
+            pipeline.set_state(Gst.State.NULL)
+
+        if not succeeded[0]:
+            raise RuntimeError("Transcoding did not complete successfully; output not written.")
+
+        print(f"Copying processed file {os.path.basename(workpath_out)} to {output_path.absolute()}")
+        shutil.copy(workpath_out, output_path)
+    finally:
+        print("Cleaning up")
+        cleanup_run_workdir(workdir_base, run_dir)
 
 
 def main():
