@@ -4,6 +4,7 @@ import time
 import json
 import argparse
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -54,17 +55,25 @@ def build_pipeline(input_path, output_path, config):
     audio_cfg = config.get("audio_encoder", {})
     caps_str = config.get("video_caps", "video/x-raw,format=I420_10LE")
 
+    # Validate untrusted config before instantiating elements from it.
+    video_name = validate_encoder_name(
+        video_cfg.get("name", "svtav1enc"), _ALLOWED_VIDEO_ENCODERS, "video")
+    audio_name = validate_encoder_name(
+        audio_cfg.get("name", "opusenc"), _ALLOWED_AUDIO_ENCODERS, "audio")
+    video_props = validate_properties(video_cfg.get("properties", {}))
+    audio_props = validate_properties(audio_cfg.get("properties", {}))
+
     # Create elements
     filesrc = Gst.ElementFactory.make("filesrc", "src")
     decodebin = Gst.ElementFactory.make("decodebin", "decoder")
     queue_v = Gst.ElementFactory.make("queue", "video_queue")
     videoconvert = Gst.ElementFactory.make("videoconvert", "videoconvert")
     capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
-    encoder = Gst.ElementFactory.make(video_cfg.get("name", "svtav1enc"), "video_encoder")
+    encoder = Gst.ElementFactory.make(video_name, "video_encoder")
     queue_a = Gst.ElementFactory.make("queue", "audio_queue")
     audioconvert = Gst.ElementFactory.make("audioconvert", "audioconvert")
     audioresample = Gst.ElementFactory.make("audioresample", "audioresample")
-    opusenc = Gst.ElementFactory.make(audio_cfg.get("name", "opusenc"), "audio_encoder")
+    opusenc = Gst.ElementFactory.make(audio_name, "audio_encoder")
     muxer = Gst.ElementFactory.make("mp4mux", "muxer")
     sink = Gst.ElementFactory.make("filesink", "sink")
 
@@ -80,10 +89,10 @@ def build_pipeline(input_path, output_path, config):
     muxer.set_property("faststart", True)
     capsfilter.set_property("caps", Gst.Caps.from_string(caps_str))
 
-    for key, value in video_cfg.get("properties", {}).items():
+    for key, value in video_props.items():
         encoder.set_property(key.replace("-", "_"), value)
 
-    for key, value in audio_cfg.get("properties", {}).items():
+    for key, value in audio_props.items():
         opusenc.set_property(key.replace("-", "_"), value)
 
     # Build pipeline
@@ -151,6 +160,78 @@ def print_progress(pipeline, start_time, duration_holder):
     return True
 
 
+# Input and output paths arrive as job arguments from the queue, which is an
+# untrusted boundary: anyone able to enqueue a job could otherwise make the
+# worker read or overwrite arbitrary files. Confine both to a single media root
+# configured out-of-band (env var), never from the job args or config file.
+def media_root() -> Path:
+    """Return the allowlisted base directory for input/output media files."""
+    root = os.environ.get("MEDIA_ROOT")
+    if not root:
+        raise RuntimeError(
+            "MEDIA_ROOT environment variable must be set to the directory that "
+            "holds the media files this worker is allowed to read and write."
+        )
+    return Path(root).resolve()
+
+
+def resolve_media_path(path, *, must_exist: bool) -> Path:
+    """Resolve a job-supplied media path and ensure it stays inside MEDIA_ROOT.
+
+    resolve() collapses symlinks and '..', so a symlink or relative escape that
+    points outside the root is rejected here rather than followed.
+    """
+    root = media_root()
+    resolved = Path(path).resolve()
+    if resolved != root and not resolved.is_relative_to(root):
+        raise ValueError(
+            f"Refusing media path outside the allowed root: {resolved} (root: {root})"
+        )
+    if must_exist and not resolved.is_file():
+        raise FileNotFoundError(f"Input file does not exist: {resolved}")
+    return resolved
+
+
+# Encoder element names and properties also come from the (untrusted) config
+# file. Restrict element instantiation to known audio/video encoders so a config
+# cannot conjure arbitrary GStreamer elements (e.g. sinks with a writable
+# "location" property), and constrain property keys/values to safe shapes.
+_ALLOWED_VIDEO_ENCODERS = {
+    "svtav1enc", "av1enc", "rav1enc", "aomenc",
+    "x264enc", "x265enc",
+    "vp8enc", "vp9enc",
+}
+_ALLOWED_AUDIO_ENCODERS = {
+    "opusenc", "vorbisenc", "flacenc", "lamemp3enc",
+    "avenc_aac", "fdkaacenc", "voaacenc",
+}
+_PROPERTY_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def validate_encoder_name(name: str, allowed: set[str], kind: str) -> str:
+    if name not in allowed:
+        raise ValueError(
+            f"Refusing disallowed {kind} encoder '{name}'. "
+            f"Allowed: {', '.join(sorted(allowed))}"
+        )
+    return name
+
+
+def validate_properties(properties: dict) -> dict:
+    """Reject malformed property keys or non-scalar values from the config."""
+    validated = {}
+    for key, value in properties.items():
+        if not isinstance(key, str) or not _PROPERTY_KEY_RE.match(key):
+            raise ValueError(f"Refusing unsafe encoder property name: {key!r}")
+        if not isinstance(value, (bool, int, float, str)):
+            raise ValueError(
+                f"Refusing unsafe value for property '{key}': "
+                f"expected bool/int/float/str, got {type(value).__name__}"
+            )
+        validated[key] = value
+    return validated
+
+
 # Directories we refuse to use as a workdir, since cleanup deletes their
 # contents recursively. The workdir comes from a (potentially untrusted)
 # config, so validate it before creating or wiping anything.
@@ -198,10 +279,10 @@ def cleanup_workdir(workdir_path: Path):
 
 
 def run_transcoding(input_path: Path, output_path: Path, config_path: Path | None=None):
-    if not isinstance(input_path, Path):
-        input_path = Path(input_path)
-    if not isinstance(output_path, Path):
-        output_path = Path(output_path)
+    # These arrive from the queue (untrusted); confine them to MEDIA_ROOT so a
+    # job cannot read or overwrite files outside the allowed media directory.
+    input_path = resolve_media_path(input_path, must_exist=True)
+    output_path = resolve_media_path(output_path, must_exist=False)
     if not isinstance(config_path, Path) and config_path:
         config_path = Path(config_path)
     config = load_config(config_path)
