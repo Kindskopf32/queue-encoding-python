@@ -2,24 +2,19 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "rq",
-#     "redis",
-#     "PyGObject",
+#     "rq==2.9.0",
+#     "redis==8.0.0",
+#     "PyGObject==3.56.3",
 # ]
 # ///
 
-import time
-import random
-import json
 import os
-from pathlib import PurePath
 import argparse
 import re
 
 import redis
 import rq
 
-from work import long_running_chore, exec_script # this is the long running job
 from transcode import run_transcoding
 
 parser = argparse.ArgumentParser()
@@ -28,18 +23,6 @@ parser.add_argument("--config", help="Path to the config file to override some s
 args = parser.parse_args()
 q = rq.Queue(connection=redis.Redis(os.environ.get("REDIS_HOST", "localhost"), 6379))
 
-#while True:
-    # Here we insert the long running function (job) along with any parameters
-#    result = q.enqueue(long_running_chore, random.randint(10, 20))
-#    time.sleep(2)
-
-#for i in range(5):
-#    job = q.enqueue(exec_script, f"file_{i}")
-#job = q.enqueue(exec_script, args.item, job_timeout=43200)
-#print(args.item)
-#print(os.path.dirname(args.item))
-#print(os.path.basename(args.item))
-#print(f"{os.path.splitext(os.path.basename(args.item))[0]}.av1.mp4")
 infile = args.item
 outfile = os.path.join(os.path.dirname(args.item), re.sub(r'\.mp4$', '.av1.mp4', os.path.basename(args.item)))
 print(f"Would encode file {infile} to {outfile}")

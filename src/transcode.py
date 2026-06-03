@@ -151,11 +151,32 @@ def print_progress(pipeline, start_time, duration_holder):
     return True
 
 
+# Directories we refuse to use as a workdir, since cleanup deletes their
+# contents recursively. The workdir comes from a (potentially untrusted)
+# config, so validate it before creating or wiping anything.
+_FORBIDDEN_WORKDIRS = {
+    Path("/"), Path("/home"), Path("/root"), Path("/etc"), Path("/usr"),
+    Path("/var"), Path("/bin"), Path("/lib"), Path("/boot"), Path("/dev"),
+    Path("/proc"), Path("/sys"), Path.home(),
+}
+
+
+def resolve_workdir(workdir_path: Path) -> Path:
+    """Resolve and validate a workdir path before it is created or wiped."""
+    workdir = Path(workdir_path).resolve()
+    if not workdir.is_absolute():
+        raise ValueError(f"Workdir must be an absolute path: {workdir}")
+    # Require some depth so we never operate on the filesystem root or a
+    # top-level directory like /home or /etc.
+    if len(workdir.parts) < 3 or workdir in _FORBIDDEN_WORKDIRS:
+        raise ValueError(f"Refusing to use unsafe workdir: {workdir}")
+    return workdir
+
+
 def prepare_workdir(workdir_path: Path):
-    workdir = workdir_path
-    workdirs = (workdir, os.path.join(workdir, "in"), os.path.join(workdir, "out"))
+    workdir = resolve_workdir(workdir_path)
+    workdirs = (workdir, workdir / "in", workdir / "out")
     for dir in workdirs:
-        dir = Path(dir)
         if not dir.is_dir():
             print(f"Creating dir {dir}")
             dir.mkdir(parents=True, exist_ok=True)
@@ -164,11 +185,16 @@ def prepare_workdir(workdir_path: Path):
 
 
 def cleanup_workdir(workdir_path: Path):
-    workdir = workdir_path
-    for root, dirs, files in workdir.walk():
-        for name in files:
-            print(f"Deleting {root / name}")
-            (root / name).unlink()
+    workdir = resolve_workdir(workdir_path)
+    # Only touch the staging subdirectories we manage, not arbitrary files
+    # that may have ended up under the workdir.
+    for sub in (workdir / "in", workdir / "out"):
+        if not sub.is_dir():
+            continue
+        for root, dirs, files in sub.walk():
+            for name in files:
+                print(f"Deleting {root / name}")
+                (root / name).unlink()
 
 
 def run_transcoding(input_path: Path, output_path: Path, config_path: Path | None=None):

@@ -2,9 +2,9 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "rq",
-#     "redis",
-#     "PyGObject",
+#     "rq==2.9.0",
+#     "redis==8.0.0",
+#     "PyGObject==3.56.3",
 # ]
 # ///
 
