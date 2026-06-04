@@ -4,8 +4,12 @@ COPY src/ /app/
 
 WORKDIR /app
 
-RUN apk add --no-cache gst-libav gst-plugins-bad gst-plugins-base gst-plugins-good gst-plugins-ugly py3-pip py3-redis py3-gobject3 && pip install rq --target /usr/lib/python3.12/site-packages --upgrade && adduser -D -u 1000 worker && chown -R 1000:1000 /app
+RUN apk add --no-cache gst-libav gst-plugins-bad gst-plugins-base gst-plugins-good gst-plugins-ugly py3-pip py3-redis py3-gobject3 && pip install rq==2.9.0 --target /usr/lib/python3.12/site-packages --upgrade && adduser -D -u 1000 worker && mkdir -p /media && chown -R 1000:1000 /app /media
 # Need to break things since rq is not available in repo and venv has no access to python system libraries and alpine cannot build cairo python bindings
+
+# Directory the worker is allowed to read input from and write output to.
+# Mount the host media directory here (e.g. -v /host/media:/media).
+ENV MEDIA_ROOT=/media
 
 # Run as a non-root user.
 USER 1000:1000
